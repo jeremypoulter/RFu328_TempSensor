@@ -3,7 +3,7 @@
 // LLAP very low power example - RFu-328 only
 //
 ///////////////////////////////////////////////////////////////////////////////
-// 
+//
 // Target:       Ciseco RFu-328
 // version:      0.1
 // date:         25 August 2013
@@ -24,15 +24,15 @@
 // RFu-328 specific AT commands (requires firmware RFu-328 V0.84 or better)
 //    The following RFu specific AT commands are supported in V0.84 or later
 //		Added a new sleep mode (ATSM3) Wake after timed interval
-//			The duration is specified by a new command ATSD, units are mS 
+//			The duration is specified by a new command ATSD, units are mS
 //			and the range is 32bit (max approx. 49 days)
 //				e.g. ATSD5265C00 is one day (hex 5265C00 is decimal 86400000)
 //				ATSD36EE80 is one hour
 //				ATSD493E0 is five minutes
-//		This sleep mode can be used to wake the 328 after a timed interval 
+//		This sleep mode can be used to wake the 328 after a timed interval
 //			by connecting RFu-328 pin 7 to pin 19, D3(INT1) or 20, D2(INT0).
-//		Using this technique means that a RFu-328 can sleep for a timed 
-//			period consuming about 0.6uA, instead of using the AVR328 watchdog (for timing) 
+//		Using this technique means that a RFu-328 can sleep for a timed
+//			period consuming about 0.6uA, instead of using the AVR328 watchdog (for timing)
 //			which uses around 7uA.
 //
 //////////////////////////////////////////////////////////////////////////////////////////////////////////
@@ -40,37 +40,37 @@
 /*
  emonTH low power temperature & humidity node
  ============================================
- 
+
  Ambient humidity & temperature (DHT22 on-board)
  Multiple remote temperature (DS18B20) - Support for other onewire sensors such as the MAX31850K may be added at a later date. (If you want to do this yourself and contribute, go for it!)
- 
+
  Provides the following inputs to emonCMS:
- 
+
  1. Battery voltage
  2. Humidity (with DHT22 on-board sensor, otherwise zero)
  3. Ambient temperature (with DHT22 on-board sensor, otherwise zero)
  4. External temperature 1 (first DS18B20)
- 5. External temperature 2 (second DS18B20) 
+ 5. External temperature 2 (second DS18B20)
  6. ... and so on. Should automatically detect any DS18B20 connected to the one wire bus. (Up to 60 sensors ordered by address.)
- 
- Notes - If you connect additional DS18B20 sensors after node has been set up, the sensor order may change. 
+
+ Notes - If you connect additional DS18B20 sensors after node has been set up, the sensor order may change.
        - Check your inputs in emoncms after adding additional sensors and reassign feeds accordingly.
        -
        - This sketch will also draw more power with more connected sensors and is optimised for getting good data rather than low power consumption.
-       - If you have a large number of sensors it is reccomended that you run your node off an external power supply. 
- 
- -----------------------------------------------------------------------------------------------------------  
+       - If you have a large number of sensors it is reccomended that you run your node off an external power supply.
+
+ -----------------------------------------------------------------------------------------------------------
  Technical hardware documentation wiki: http://wiki.openenergymonitor.org/index.php?title=EmonTH
- 
+
  Part of the openenergymonitor.org project
  Licence: GNU GPL V3
- 
+
  Authors: Dave McCraw (original creator), Marshall Scholz (added autimatic onewire scanning)
- 
+
  Based on the emonTH_DHT22_DS18B20 sketch by Glyn Hudson and the DallasTemperature Tester sketch.
- 
+
  THIS SKETCH REQUIRES:
- 
+
  Libraries in the standard arduino libraries folder:
    - RFu JeeLib           https://github.com/openenergymonitor/RFu_jeelib   - to work with CISECO RFu328 module
    - DHT22 Sensor Library https://github.com/adafruit/DHT-sensor-library    - be sure to rename the sketch folder to remove the '-'
@@ -78,9 +78,31 @@
    - DallasTemperature    http://download.milesburton.com/Arduino/MaximTemperature/DallasTemperature_LATEST.zip - DS18B20 sensors
  */
 
+#include <Arduino.h>
 #include <LLAPSerial.h>
 #include <OneWire.h>
 #include <DallasTemperature.h>
+
+// Prototypes
+uint8_t setupSRF();
+uint8_t enterCommandMode();
+uint8_t sendCommand(char* lpszCommand);
+uint8_t checkOK(int timeout);
+
+void dodelay(unsigned int ms);
+long readVcc();
+void printAddress(DeviceAddress deviceAddress);
+void led_error();
+
+void initialise_DS18B20();
+void start_ds18b20_reading();
+float take_ds18b20_reading(int i);
+
+boolean temperature_in_range(float temp);
+
+// configaturation
+#define LED_PIN 6
+#define NODE    "T1"
 
 // Onewire bus configaturation
 // ======================================================================================================================================
@@ -92,13 +114,13 @@ const int TEMPERATURE_PRECISION = 12;  // Default 12  - Onewire temperature sens
  /*
   NOTE: - There is a trade off between power consumption and sensor resolution.
         - A higher resolution will keep the processor awake longer - Approximate values found below.
-                                     
+
   - DS18B20 temperature precision:
       9bit: 0.5C,  10bit: 0.25C,  11bit: 0.1125C, 12bit: 0.0625C
   - Required delay when reading DS18B20
       9bit: 95ms,  10bit: 187ms,  11bit: 375ms,   12bit: 750ms
-     
-  More info can be found here: http://harizanov.com/2013/07/optimizing-ds18b20-code-for-low-power-applications/   
+
+  More info can be found here: http://harizanov.com/2013/07/optimizing-ds18b20-code-for-low-power-applications/
  */
 
 // SRF pin configaturation
@@ -110,7 +132,7 @@ const int RADIO_IRQ = 2;
 // Global variables
 // ======================================================================================================================================
 
-boolean debug = false; // variable to store is debug is avalable or not. 
+boolean debug = false; // variable to store is debug is avalable or not.
 
 enum
 {
@@ -135,9 +157,12 @@ DeviceAddress tempDeviceAddress; // We'll use this variable to store a found one
 
 void setup()
 {
+  pinMode(LED_PIN, OUTPUT);           // pin 4 controls the radio sleep
+  digitalWrite(LED_PIN, HIGH);         // wake the radio
+
   Serial.begin(115200);         // Start the serial port
-  
-  LLAP.init("LP");                  // Initialise the LLAPSerial library and the device identity
+
+  LLAP.init(NODE);                  // Initialise the LLAPSerial library and the device identity
 
   pinMode(RADIO_ENABLE, OUTPUT);           // pin 8 controls the radio
   digitalWrite(RADIO_ENABLE, HIGH);        // select the radio
@@ -152,6 +177,7 @@ void setup()
   while ((val = setupSRF()) != 5)
   {
     LLAP.sendInt("ERR",val); // Diagnostic
+    led_error();
     dodelay(5000);	// try again in 5 seconds
   }
 
@@ -159,7 +185,7 @@ void setup()
   pinMode(DS18B20_PWR, OUTPUT);
 
   // Did we find any sensors?
-  while (0 == numberOfDevices) 
+  while (0 == numberOfDevices)
   {
     // Find & Initialise sensors
     initialise_DS18B20();
@@ -168,12 +194,15 @@ void setup()
     }
 
     LLAP.sendInt("ERR", -1); // Diagnostic
+    led_error();
     dodelay(5000);
   }
 
   LLAP.sendMessage(F("STARTED"));  // send the usual "started message
   dodelay(50);
   pinMode(RADIO_WAKE, INPUT);             // sleep the radio
+
+  digitalWrite(LED_PIN, LOW);
 
   state = INIT;
 }
@@ -203,7 +232,7 @@ void loop()
     LLAP.sleep(RADIO_IRQ, RISING, false);		// sleep until woken on pin 2, no pullup (low power)
 
     // Signal the SRF that we are awake
-    pinMode(RADIO_WAKE, OUTPUT); 
+    pinMode(RADIO_WAKE, OUTPUT);
     return;
   }
   // do we need to nap
@@ -255,6 +284,7 @@ void loop()
     case POWER_ON_RADIO:
       // wake the radio
       //pinMode(RADIO_WAKE, OUTPUT);
+      digitalWrite(LED_PIN, HIGH);
 
       // Send the sensor values
       LLAP.sendIntWithDP("BATT", batt, 3);
@@ -266,6 +296,8 @@ void loop()
       //pinMode(RADIO_WAKE, INPUT);
       state = INIT;
       sleep = 10;
+      digitalWrite(LED_PIN, LOW);
+
       break;
   }
 }
@@ -347,13 +379,13 @@ void initialise_DS18B20()
   sensors.begin();
 
   // Disable automatic temperature conversion to reduce time spent awake, instead we sleep for ASYNC_DELAY
-  // see http://harizanov.com/2013/07/optimizing-ds18b20-code-for-low-power-applications/ 
+  // see http://harizanov.com/2013/07/optimizing-ds18b20-code-for-low-power-applications/
   sensors.setWaitForConversion(false);
 
   // Grab a count of devices on the wire
   numberOfDevices = sensors.getDeviceCount();
 
-  // Detect if too many devices are connected 
+  // Detect if too many devices are connected
   if (numberOfDevices > MaxOnewire)
   {
     numberOfDevices = MaxOnewire; // Set number of devices to maximum allowed sensors to prevent the extra sensors from being included.
@@ -433,7 +465,7 @@ void printAddress(DeviceAddress deviceAddress)
 
 void start_ds18b20_reading()
 {
-  // call sensors.requestTemperatures() to issue a global temperature 
+  // call sensors.requestTemperatures() to issue a global temperature
   // request to all devices on the bus
   sensors.requestTemperatures(); // Send the command to get temperatures
   if (debug) {
@@ -510,3 +542,10 @@ long readVcc()
   return result;
 }
 
+void led_error()
+{
+  for(int i = 0; i < 3; i++) {
+    digitalWrite(LED_PIN, HIGH); delay(100);
+    digitalWrite(LED_PIN, LOW); delay(100);
+  }
+}
